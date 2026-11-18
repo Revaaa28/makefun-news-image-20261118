@@ -2,8 +2,10 @@
 """Render entry.png: the world news of Wednesday 18 November 2026 in one image.
 
 Newspaper-poster style, drawn entirely with PIL shapes and DejaVu type so
-every word stays crisp. The picture is a masthead naming the day, six story
-panels (place, icon, headline) and a ticker strip along the bottom.
+every word stays crisp. V2 layout: the masthead naming the day, a dotted
+world map with numbered pins for the six panel stories (plus dots for the
+briefs), the six story panels in a 3x2 grid, and an "Around the world in
+brief" section of eleven one-line briefs — 17 stories in all.
 
 Run:  python3 tools/make_image.py   ->  writes entry.png next to main.py
 """
@@ -18,6 +20,7 @@ PAPER = (247, 241, 227)      # cream newsprint
 NAVY = (20, 33, 61)          # ink navy
 RED = (193, 39, 45)          # accent red
 PANEL_BG = (255, 253, 246)   # panel paper
+MAP_BG = (233, 238, 243)     # pale sea grey-blue
 CREAM = (247, 241, 227)
 WHITE = (255, 255, 255)
 
@@ -58,16 +61,20 @@ def wrap_text(d, text, f, max_w):
     return lines
 
 
-def headline_lines(d, text, max_w, max_lines=3, start=33):
-    """Shrink the headline font until the wrap fits max_lines lines."""
+def headline_lines(d, text, max_w, max_lines=3, start=33, minimum=22,
+                   max_h=None):
+    """Shrink the headline font until the wrap fits max_lines lines
+    (and, when max_h is given, fits that pixel height too)."""
     size = start
-    while size >= 22:
+    while size >= minimum:
         f = font(SANS_B, size)
         lines = wrap_text(d, text, f, max_w)
-        if len(lines) <= max_lines:
+        lh = int(size * 1.18)
+        if len(lines) <= max_lines and (max_h is None
+                                        or len(lines) * lh <= max_h):
             return f, lines
-        size -= 2
-    f = font(SANS_B, 22)
+        size -= 1
+    f = font(SANS_B, minimum)
     return f, wrap_text(d, text, f, max_w)
 
 
@@ -188,6 +195,14 @@ def icon_flags(d, x, y):
         d.ellipse([x + dx - 2, y + dy - 2, x + dx + 2, y + dy + 2], fill=CREAM)
 
 
+def render_icon(icon_fn, size):
+    """Draw an icon in its native 110x110 box, then scale it to size."""
+    tmp = Image.new("RGBA", (110, 110), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tmp)
+    icon_fn(td, 0, 0)
+    return tmp.resize((size, size), Image.LANCZOS)
+
+
 # ---------------------------------------------------------------- layout
 
 PANELS = [
@@ -215,52 +230,200 @@ def draw_masthead(d):
            font=font(SERIF, 29), fill=NAVY, anchor="mm")
 
 
-def draw_panel(d, px, py, pw, ph, place, headline, icon_fn):
+# ------------------------------------------------------------- world map
+# Equirectangular landmask, 104 columns (lon -180..180) by 24 rows
+# (lat +80..-58). '#' is land, '.' is sea. Authored by hand; the pins and
+# dots below are (column, row) cells in the same grid.
+
+LANDMASK = [
+    "....................########...........#####...........##..###....#############.......#########.....###.",
+    "...########....####################...########.......##################################################.",
+    "...#########...##########.....########..#####..#....##################################################..",
+    "....########....###########...########...##.......###################################################...",
+    "...............############..########.............###############################################.###...",
+    "................#####################.............############################################...##.....",
+    "................###################..............##########...####################################......",
+    "...............##################................###..#######.##############################...##.......",
+    "...............################.................###########################################.............",
+    "................###########.##.................######################...#################...............",
+    "..................##########.###...............#################.........#####..######.##...............",
+    "........................###########............#######################....###....#####.##...............",
+    "..........................###########...........####################........#.....###########...........",
+    "...........................##############........################..................########...#######...",
+    "...........................###############............##########.....................#########.######...",
+    "............................###############............#########.........................###.#####......",
+    ".............................############..............#########.......................###########......",
+    "..............................#########................########.###....................###########......",
+    "..............................########..................######..##......................#########.......",
+    "...............................######....................#####...........................#######......##",
+    "...............................#####........................................................#####....###",
+    "...............................####..................................................................##.",
+    "...............................###......................................................................",
+    "...............................##.......................................................................",
+]
+
+# (label, column, row): the six panel stories.
+MAP_PINS = [
+    ("1", 87, 11),    # Manila
+    ("2", 61, 5),     # Kyiv (Crimea just below)
+    ("3", 67, 9),     # Bahrain
+    ("4", 78, 11),    # Bay of Bengal
+    ("5", 53, 5),     # Brussels
+    ("6a", 86, 7),    # Beijing
+    ("6b", 30, 6),    # Ottawa
+]
+
+# (column, row): small unnumbered dots for the briefs' regions.
+MAP_DOTS = [
+    (69, 8),    # Hormuz
+    (81, 11),   # Thailand
+    (24, 7),    # United States
+    (74, 9),    # New Delhi
+    (75, 10),   # India
+    (51, 4),    # London
+    (65, 7),    # Tehran
+    (80, 10),   # Dhaka
+    (9, 14),    # El Niño, mid-Pacific
+]
+
+MAP_X0, MAP_Y0 = 48.5, 319.2     # centre of the (0, 0) cell
+MAP_PX, MAP_PY = 9.0, 6.42       # cell pitch in pixels
+
+
+def map_cell(col, row):
+    return (MAP_X0 + col * MAP_PX, MAP_Y0 + row * MAP_PY)
+
+
+def draw_map(d):
+    d.rectangle([28, 276, 996, 476], fill=MAP_BG, outline=NAVY, width=3)
+    d.rectangle([28, 276, 996, 308], fill=NAVY)
+    d.text((44, 292), "THE DAY ON THE MAP", font=font(SANS_B, 21),
+           fill=WHITE, anchor="lm")
+    note = "numbered pins: the six panels · red dots: the briefs"
+    f = fit_font(d, note, SANS, 470, 15, minimum=11)
+    d.text((980, 292), note, font=f, fill=CREAM, anchor="rm")
+    for row, line in enumerate(LANDMASK):
+        for col, ch in enumerate(line):
+            if ch == "#":
+                cx, cy = map_cell(col, row)
+                d.ellipse([cx - 2.7, cy - 2.7, cx + 2.7, cy + 2.7], fill=NAVY)
+    for col, row in MAP_DOTS:
+        cx, cy = map_cell(col, row)
+        d.ellipse([cx - 3.2, cy - 3.2, cx + 3.2, cy + 3.2], fill=RED,
+                  outline=WHITE, width=1)
+    for label, col, row in MAP_PINS:
+        cx, cy = map_cell(col, row)
+        if len(label) > 1:
+            r, fs = 11, 10
+        else:
+            r, fs = 10, 13
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=RED, outline=WHITE,
+                  width=2)
+        d.text((cx, cy), label, font=font(SANS_B, fs), fill=WHITE, anchor="mm")
+
+
+def draw_panel(img, d, px, py, pw, ph, place, headline, icon_fn):
     d.rectangle([px, py, px + pw, py + ph], fill=PANEL_BG, outline=NAVY, width=3)
-    d.rectangle([px, py, px + pw, py + 42], fill=NAVY)
-    d.text((px + 14, py + 21), place, font=font(SANS_B, 27), fill=WHITE,
+    d.rectangle([px, py, px + pw, py + 30], fill=NAVY)
+    d.text((px + 12, py + 15), place, font=font(SANS_B, 21), fill=WHITE,
            anchor="lm")
-    d.rectangle([px + pw - 26, py + 15, px + pw - 14, py + 27], fill=RED)
-    icon_fn(d, px + 12, py + 56)
-    tx = px + 136
-    tw = px + pw - 12 - tx
-    f, lines = headline_lines(d, headline, tw)
-    ty = py + 58
-    lh = int(f.size * 1.24)
+    d.rectangle([px + pw - 24, py + 9, px + pw - 12, py + 21], fill=RED)
+    icon = render_icon(icon_fn, 84)
+    img.paste(icon, (px + 10, py + 36), icon)
+    tx = px + 106
+    tw = pw - 106 - 10
+    f, lines = headline_lines(d, headline, tw, max_lines=4, start=20,
+                              minimum=14, max_h=86)
+    ty = py + 38
+    lh = int(f.size * 1.18)
     for line in lines:
         d.text((tx, ty), line, font=f, fill=NAVY, anchor="la")
         ty += lh
 
 
-def draw_grid(d):
-    pw, ph = 477, 198
+def draw_grid(img, d):
+    pw, ph = 314, 124
     for i, (place, headline, icon_fn) in enumerate(PANELS):
-        px = 28 + (i % 2) * (pw + 14)
-        py = 284 + (i // 2) * (ph + 14)
-        draw_panel(d, px, py, pw, ph, place, headline, icon_fn)
+        px = 28 + (i % 3) * (pw + 13)
+        py = 486 + (i // 3) * (ph + 8)
+        draw_panel(img, d, px, py, pw, ph, place, headline, icon_fn)
 
 
-TICKER_LINES = [
-    "UK sanctions Israeli settlement firms",
-    "Strong El Niño brings droughts and wildfires",
-    "India beat Pakistan 2-1 in Dhaka to win a record 10th SAFF football title",
+# ---------------------------------------------------------------- briefs
+
+BRIEFS = [
+    ("HORMUZ", "Attack on the Panama-flagged tanker MT Tara Gas; 21 of 24 "
+               "Indian crew evacuated safely at Khasab."),
+    ("THAILAND", "A major fire kills 11 people and injures more than a dozen."),
+    ("UNITED STATES", "Outages hit Chase, Wells Fargo and Zelle; Microsoft "
+                      "services restored after 36 hours down."),
+    ("MANILA", "Modi offers free e-visas and deeper maritime ties to ASEAN."),
+    ("NEW DELHI", "India re-elected to the ITU Council for 2027-2030."),
+    ("INDIA", "Amazon announces a $7 billion investment in renewable energy."),
+    ("LONDON", "Clashes between Bangladeshi party supporters injure at "
+               "least four."),
+    ("TEHRAN", "Iran warns of worsening gas shortages this winter as energy "
+               "sites take damage."),
+    ("LONDON", "UK sanctions Israeli settlement firms."),
+    ("GLOBAL", "Strong El Niño brings droughts and wildfires."),
+    ("DHAKA", "India beat Pakistan 2-1 to win a record 10th SAFF "
+              "football title."),
 ]
 
 
-def draw_ticker(d):
-    d.rectangle([0, 920, W, H], fill=NAVY)
-    d.rectangle([0, 920, W, 924], fill=RED)
-    for i, line in enumerate(TICKER_LINES):
-        f = fit_font(d, line, SANS_B, 980, 24, minimum=16)
-        d.text((512, 941 + i * 31), line, font=f, fill=WHITE, anchor="mm")
+def draw_brief(d, x, y, place, body, max_w):
+    """One brief: bold-caps place lead-in, regular body, wrapped by hand so
+    the bold lead-in is measured with the bold font. At most two lines."""
+    f_b = font(SANS_B, 14)
+    f_r = font(SANS, 14)
+    space_w = d.textlength(" ", font=f_r)
+    tokens = [(w, True) for w in place.split()]
+    tokens.append(("—", True))
+    tokens += [(w, False) for w in body.split()]
+    lines, cur, cur_w = [], [], 0.0
+    for word, bold in tokens:
+        ww = d.textlength(word, font=f_b if bold else f_r)
+        add = ww if not cur else ww + space_w
+        if cur and cur_w + add > max_w:
+            lines.append(cur)
+            cur, cur_w = [(word, bold, ww)], ww
+        else:
+            cur.append((word, bold, ww))
+            cur_w += add
+    if cur:
+        lines.append(cur)
+    for i, line in enumerate(lines[:2]):
+        lx = x
+        for word, bold, ww in line:
+            d.text((lx, y + i * 17), word, font=f_b if bold else f_r,
+                   fill=NAVY, anchor="la")
+            lx += ww + space_w
+
+
+def draw_briefs(d):
+    d.rectangle([28, 752, 996, 1016], fill=PANEL_BG, outline=NAVY, width=3)
+    d.rectangle([28, 752, 996, 782], fill=NAVY)
+    d.text((44, 767), "AROUND THE WORLD IN BRIEF", font=font(SANS_B, 21),
+           fill=WHITE, anchor="lm")
+    d.text((980, 767), "11 more stories from the day", font=font(SANS, 15),
+           fill=CREAM, anchor="rm")
+    d.line([512, 794, 512, 1006], fill=(203, 199, 186), width=1)
+    for i, (place, body) in enumerate(BRIEFS[:6]):
+        draw_brief(d, 44, 796 + i * 36, place, body, 448)
+    for i, (place, body) in enumerate(BRIEFS[6:]):
+        draw_brief(d, 524, 796 + i * 36, place, body, 448)
 
 
 def main():
+    for row in LANDMASK:
+        assert len(row) == 104, f"landmask row has {len(row)} cells"
+    assert len(LANDMASK) == 24
     img = Image.new("RGB", (W, H), PAPER)
     d = ImageDraw.Draw(img)
     draw_masthead(d)
-    draw_grid(d)
-    draw_ticker(d)
+    draw_map(d)
+    draw_grid(img, d)
+    draw_briefs(d)
     out = Path(__file__).resolve().parent.parent / "entry.png"
     img.save(out, "PNG", optimize=True)
     print(f"wrote {out} ({out.stat().st_size} bytes)")
